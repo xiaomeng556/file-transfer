@@ -23,7 +23,7 @@ func InitUploadDir() error {
 	return os.MkdirAll(uploadDir, 0755)
 }
 
-// UploadFile 处理文件上传
+// UploadFile 处理文件上传（保留原接口，用于兼容旧逻辑）
 func UploadFile(c *gin.Context) {
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
@@ -76,6 +76,122 @@ func UploadFile(c *gin.Context) {
 		"filename": header.Filename, // 原始文件名
 		"saveName": saveName,        // 实际保存的文件名（重点）
 		"size":     header.Size,
+	})
+}
+
+// UploadChunk 处理文件块上传
+func UploadChunk(c *gin.Context) {
+	file, _, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "获取文件失败"})
+		return
+	}
+	defer file.Close()
+
+	fileHash := c.PostForm("fileHash")
+	chunkIndex := c.PostForm("chunkIndex")
+
+	// 临时存储目录
+	tempDir := filepath.Join("./temp", fileHash)
+	_ = os.MkdirAll(tempDir, 0755)
+
+	// 保存文件块
+	chunkPath := filepath.Join(tempDir, chunkIndex)
+	dst, err := os.Create(chunkPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建文件块失败"})
+		return
+	}
+	defer dst.Close()
+
+	// 写入文件块
+	bufferSize := 1024 * 1024
+	buffer := make([]byte, bufferSize)
+	for {
+		n, err := file.Read(buffer)
+		if err != nil && err != io.EOF {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "读取文件失败"})
+			return
+		}
+		if n == 0 {
+			break
+		}
+		if _, err := dst.Write(buffer[:n]); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "写入文件失败"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "文件块上传成功"})
+}
+
+// MergeChunks 合并文件块
+func MergeChunks(c *gin.Context) {
+	var req struct {
+		FileHash    string `json:"fileHash"`
+		FileName    string `json:"fileName"`
+		TotalChunks int    `json:"totalChunks"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误"})
+		return
+	}
+
+	tempDir := filepath.Join("./temp", req.FileHash)
+	uploadDir := "./uploads"
+	_ = os.MkdirAll(uploadDir, 0755)
+
+	// 创建最终文件
+	savePath := getUniqueFileName(uploadDir, req.FileName)
+	dst, err := os.Create(savePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建文件失败"})
+		return
+	}
+	defer dst.Close()
+
+	// 按顺序合并文件块
+	for i := 0; i < req.TotalChunks; i++ {
+		chunkPath := filepath.Join(tempDir, strconv.Itoa(i))
+		chunkFile, err := os.Open(chunkPath)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "读取文件块失败"})
+			return
+		}
+
+		// 写入文件块
+		bufferSize := 1024 * 1024
+		buffer := make([]byte, bufferSize)
+		for {
+			n, err := chunkFile.Read(buffer)
+			if err != nil && err != io.EOF {
+				chunkFile.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "读取文件块失败"})
+				return
+			}
+			if n == 0 {
+				break
+			}
+			if _, err := dst.Write(buffer[:n]); err != nil {
+				chunkFile.Close()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "写入文件失败"})
+				return
+			}
+		}
+		chunkFile.Close()
+	}
+
+	// 删除临时文件
+	_ = os.RemoveAll(tempDir)
+
+	// 获取保存后的文件名
+	saveName := filepath.Base(savePath)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "文件上传成功",
+		"filename": req.FileName,
+		"saveName": saveName,
 	})
 }
 
@@ -306,4 +422,24 @@ func GroupSendFile(c *gin.Context) {
 		"filename": request.Filename,
 		"sentTo":   sentUsers,
 	})
+}
+
+// DeleteFile 删除文件
+func DeleteFile(c *gin.Context) {
+	filename := c.Param("filename")
+	filePath := filepath.Join(uploadDir, filename)
+
+	// 检查文件是否存在
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "文件不存在"})
+		return
+	}
+
+	// 删除文件
+	if err := os.Remove(filePath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除文件失败: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "文件删除成功"})
 }

@@ -44,6 +44,7 @@
               <button @click="previewFile(file)" v-if="file.type === 'text' || file.type === 'image' || file.type === 'video'">预览</button>
               <button @click="downloadFile(file.name)">下载</button>
               <button @click="openGroupSendModal(file)">群发</button>
+              <button @click="deleteFile(file.name)" class="delete-btn">删除</button>
             </td>
           </tr>
         </tbody>
@@ -140,24 +141,131 @@ const handleFileChange = (e: Event) => {
   }
 }
 
+// 计算文件MD5
+const calculateFileHash = async (file: File): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = async (e) => {
+      try {
+        const arrayBuffer = e.target?.result as ArrayBuffer
+        // 简化版：使用文件名+大小作为临时唯一标识
+        // 实际项目中应使用crypto API计算MD5
+        const hash = `${file.name}-${file.size}-${file.lastModified}`
+        resolve(hash)
+      } catch (error) {
+        reject(error)
+      }
+    }
+    reader.onerror = reject
+    // 只读取文件的前1MB用于计算哈希，提高性能
+    const slice = file.slice(0, 1024 * 1024)
+    reader.readAsArrayBuffer(slice)
+  })
+}
+
+// 文件分块
+const chunkFile = (file: File, chunkSize: number = 1024 * 1024) => {
+  const chunks = []
+  let current = 0
+  while (current < file.size) {
+    chunks.push({
+      file: file.slice(current, current + chunkSize),
+      start: current,
+      end: Math.min(current + chunkSize, file.size),
+      index: Math.floor(current / chunkSize)
+    })
+    current += chunkSize
+  }
+  return chunks
+}
+
+// 上传单个文件块
+const uploadChunk = async (chunk: any, fileHash: string, totalChunks: number, fileName: string) => {
+  const formData = new FormData()
+  formData.append('file', chunk.file)
+  formData.append('fileHash', fileHash)
+  formData.append('chunkIndex', chunk.index.toString())
+  formData.append('totalChunks', totalChunks.toString())
+  formData.append('fileName', fileName)
+
+  const response = await fetch('/api/upload-chunk', {
+    method: 'POST',
+    body: formData
+  })
+
+  if (!response.ok) {
+    throw new Error('上传文件块失败')
+  }
+
+  return response.json()
+}
+
 // 上传文件
 const uploadFile = async () => {
   if (!selectedFile.value) return
-
-  const formData = new FormData()
-  formData.append('file', selectedFile.value)
 
   uploadProgress.value = 0
   uploadMessage.value = ''
 
   try {
-    const response = await fetch('/api/upload', {
+    const file = selectedFile.value
+    const chunkSize = 1024 * 1024 // 1MB
+    const chunks = chunkFile(file, chunkSize)
+    const totalChunks = chunks.length
+    const fileHash = await calculateFileHash(file)
+
+    // 并行上传，最多3个并发
+    const maxConcurrency = 3
+    const uploadedChunks = new Set<number>()
+    let activeUploads = 0
+    let currentIndex = 0
+
+    const uploadNext = async () => {
+      if (currentIndex >= totalChunks) return
+
+      while (activeUploads < maxConcurrency && currentIndex < totalChunks) {
+        const chunk = chunks[currentIndex]
+        currentIndex++
+        activeUploads++
+
+        uploadChunk(chunk, fileHash, totalChunks, file.name)
+          .then(() => {
+            uploadedChunks.add(chunk.index)
+            uploadProgress.value = Math.round((uploadedChunks.size / totalChunks) * 100)
+          })
+          .catch((error) => {
+            throw error
+          })
+          .finally(() => {
+            activeUploads--
+            uploadNext()
+          })
+      }
+    }
+
+    // 开始并行上传
+    await uploadNext()
+
+    // 等待所有上传完成
+    while (activeUploads > 0) {
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+
+    // 合并文件
+    const mergeResponse = await fetch('/api/merge-chunks', {
       method: 'POST',
-      body: formData
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        fileHash,
+        fileName: file.name,
+        totalChunks
+      })
     })
 
-    if (response.ok) {
-      const data = await response.json()
+    if (mergeResponse.ok) {
+      const data = await mergeResponse.json()
       uploadSuccess.value = true
       uploadMessage.value = data.message
       await fetchFiles()
@@ -168,7 +276,7 @@ const uploadFile = async () => {
       selectedFile.value = null
     } else {
       uploadSuccess.value = false
-      uploadMessage.value = '上传失败'
+      uploadMessage.value = '文件合并失败'
     }
   } catch (error) {
     uploadSuccess.value = false
@@ -306,6 +414,28 @@ const formatSize = (size: number): string => {
 // 格式化时间
 const formatTime = (time: string): string => {
   return new Date(time).toLocaleString()
+}
+
+// 删除文件
+const deleteFile = async (filename: string) => {
+  if (confirm(`确定要删除文件 ${filename} 吗？`)) {
+    try {
+      const response = await fetch(`/api/delete/${filename}`, {
+        method: 'DELETE'
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        alert(data.message)
+        await fetchFiles() // 重新获取文件列表
+      } else {
+        const data = await response.json()
+        alert('删除失败: ' + data.error)
+      }
+    } catch (error) {
+      alert('删除失败: ' + error)
+    }
+  }
 }
 
 // 组件挂载时获取文件列表
@@ -655,6 +785,14 @@ button:disabled {
     font-size: 12px;
     padding: 4px 8px;
     margin-right: 3px;
+  }
+
+  .delete-btn {
+    background-color: #dc3545;
+  }
+
+  .delete-btn:hover {
+    background-color: #c82333;
   }
   
   form {

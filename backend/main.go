@@ -22,6 +22,12 @@ func main() {
 	// 上传文件
 	router.POST("/upload", handler.UploadFile)
 
+	// 上传文件块
+	router.POST("/upload-chunk", handler.UploadChunk)
+
+	// 合并文件块
+	router.POST("/merge-chunks", handler.MergeChunks)
+
 	// 下载文件
 	router.GET("/download/:filename", handler.DownloadFile)
 
@@ -36,6 +42,9 @@ func main() {
 
 	// 群发文件
 	router.POST("/group-send", handler.GroupSendFile)
+
+	// 删除文件
+	router.DELETE("/delete/:filename", handler.DeleteFile)
 
 	fmt.Println("服务器启动在 :8080")
 	if err := router.Run(":8080"); err != nil {
