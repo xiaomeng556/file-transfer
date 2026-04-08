@@ -7,7 +7,8 @@
       <h2>上传文件</h2>
       <form @submit.prevent="uploadFile">
         <input type="file" ref="fileInput" @change="handleFileChange" />
-        <button type="submit" :disabled="!selectedFile">上传</button>
+        <button type="submit" :disabled="!selectedFile || isUploading">上传</button>
+        <button @click="cancelUpload" v-if="isUploading" class="cancel-btn">取消上传</button>
       </form>
       <div v-if="uploadProgress > 0 && uploadProgress < 100" class="progress">
         <div class="progress-bar" :style="{ width: uploadProgress + '%' }"></div>
@@ -120,6 +121,8 @@ const uploadMessage = ref('')
 const uploadSuccess = ref(false)
 const files = ref<any[]>([])
 const users = ref<any[]>([])
+const isUploading = ref(false)
+const abortController = ref<AbortController | null>(null)
 
 // 预览相关变量
 const previewVisible = ref(false)
@@ -190,7 +193,8 @@ const uploadChunk = async (chunk: any, fileHash: string, totalChunks: number, fi
 
   const response = await fetch('/api/upload-chunk', {
     method: 'POST',
-    body: formData
+    body: formData,
+    signal: abortController.value?.signal
   })
 
   if (!response.ok) {
@@ -206,6 +210,8 @@ const uploadFile = async () => {
 
   uploadProgress.value = 0
   uploadMessage.value = ''
+  isUploading.value = true
+  abortController.value = new AbortController()
 
   try {
     const file = selectedFile.value
@@ -234,7 +240,9 @@ const uploadFile = async () => {
             uploadProgress.value = Math.round((uploadedChunks.size / totalChunks) * 100)
           })
           .catch((error) => {
-            throw error
+            if (error.name !== 'AbortError') {
+              throw error
+            }
           })
           .finally(() => {
             activeUploads--
@@ -251,6 +259,12 @@ const uploadFile = async () => {
       await new Promise(resolve => setTimeout(resolve, 100))
     }
 
+    // 检查是否被取消
+    if (abortController.value?.signal.aborted) {
+      uploadMessage.value = '上传已取消'
+      return
+    }
+
     // 合并文件
     const mergeResponse = await fetch('/api/merge-chunks', {
       method: 'POST',
@@ -261,7 +275,8 @@ const uploadFile = async () => {
         fileHash,
         fileName: file.name,
         totalChunks
-      })
+      }),
+      signal: abortController.value?.signal
     })
 
     if (mergeResponse.ok) {
@@ -279,9 +294,24 @@ const uploadFile = async () => {
       uploadMessage.value = '文件合并失败'
     }
   } catch (error) {
-    uploadSuccess.value = false
-    uploadMessage.value = '上传失败: ' + error
+    if (error.name !== 'AbortError') {
+      uploadSuccess.value = false
+      uploadMessage.value = '上传失败: ' + error
+    } else {
+      uploadMessage.value = '上传已取消'
+    }
   } finally {
+    isUploading.value = false
+    abortController.value = null
+  }
+}
+
+// 取消上传
+const cancelUpload = () => {
+  if (abortController.value) {
+    abortController.value.abort()
+    isUploading.value = false
+    uploadMessage.value = '上传已取消'
     uploadProgress.value = 0
   }
 }
@@ -793,6 +823,15 @@ button:disabled {
 
   .delete-btn:hover {
     background-color: #c82333;
+  }
+
+  .cancel-btn {
+    background-color: #6c757d;
+    margin-left: 10px;
+  }
+
+  .cancel-btn:hover {
+    background-color: #5a6268;
   }
   
   form {
